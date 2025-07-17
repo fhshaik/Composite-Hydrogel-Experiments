@@ -14,7 +14,7 @@ today = datetime.today().strftime('%Y-%m-%d') # today's date!
 
 # %% take in most recent test_info file
 
-date = '2025-07-14'
+date = '2025-07-16'
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
