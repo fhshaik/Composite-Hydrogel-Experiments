@@ -29,7 +29,7 @@ air_folder = os.path.join(file_folder, 'AIR', 'CSV')
 
 # Read test info
 test_info = pd.read_csv(test_info_path)
-
+air_info = pd.read_csv(os.path.join(csv_folder, 'air_test_info.csv'))
 # Load pickle files
 with open(os.path.join(saved_data_dir, 'tests.pkl'), 'rb') as f:
     tests = pickle.load(f)
