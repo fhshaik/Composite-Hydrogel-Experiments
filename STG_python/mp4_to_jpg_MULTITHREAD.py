@@ -88,25 +88,18 @@ def convert_vid_part(video, folder, save_folder, start, end):
 # %%
 
 if __name__ == '__main__':
-    
-    # folder with videos
-    folder = "E:\\STG\\Videos\\2025-07-21\\"
-    # folder = "E:\\LONG\\"
-    # folder = 'D:\\Jaeger Lab\\CORNSTARCH_IMPACTOR\\2023-11-07\\'
-    
-    save_folder = folder
+    # Set up for C2225.MP4 in the current directory
+    video_filename = 'C2225'
+    mp4_path = os.path.join(os.path.dirname(__file__), video_filename + '.MP4')
+    frames_folder = os.path.join(os.path.dirname(__file__), video_filename + '_frames')
 
-    # all video names (excluding filetype suffix)
-    videos = [i.split('.')[0] for i in os.listdir(folder) if ('M01' not in i and '.MP4' in i)][-2:]
-    
-    # names of original directories (to get videos from)
-    folders = [folder + v for v in videos]
-    
-    # # names of new directories (to save converted frames)
-    save_folders = [folder + v for v in videos]
-    
-    # # zip corresponding list elements for each video
-    vid_info = list(zip(videos, folders, save_folders))
-    
-    # # run the pool!
+    if not os.path.exists(mp4_path):
+        raise FileNotFoundError(f"Video file not found: {mp4_path}")
+    if not os.path.exists(frames_folder):
+        os.mkdir(frames_folder)
+
+    # Prepare info for processing
+    vid_info = [(video_filename, os.path.splitext(mp4_path)[0], frames_folder)]
     run_pool(vid_info)
+
+    image_folder = os.path.join(os.path.dirname(__file__), 'C2225_frames')
