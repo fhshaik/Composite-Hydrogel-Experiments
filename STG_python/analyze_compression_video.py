@@ -19,13 +19,6 @@ from datetime import datetime
 import circle_fit
 import multiprocessing as mp
 
-# --- ADDED: Parameters for motion detection ---
-BLUR_KERNEL = (7, 7)  # Gaussian blur kernel size
-ROLLING_WINDOW = 7    # Rolling mean window size for MSE smoothing
-THRESHOLD_FACTOR = 3  # How many std devs above noise to trigger motion
-CONSECUTIVE_FRAMES = 5  # Require threshold to be exceeded for this many frames
-# --- END ADDED ---
-
 today = datetime.today().strftime('%Y-%m-%d')
 
 # %% get distance between two points
@@ -46,13 +39,8 @@ def find_puck(img):
     
     # crop image close to puck, with right side of image the center of the impactor
     global crop_top, crop_bottom, crop_left, crop_right
-    
-    crop_top = 250
-    crop_bottom = 70
-    crop_left = 100
-    crop_right = impactor_center + impactor_left
-    
-    img = img[crop_top:-crop_bottom, crop_left:crop_right]
+        
+    img = img[:, :, 2]
     
     # threshold image
     _, thresh = cv2.threshold(img, 150, 200, cv2.THRESH_BINARY)
@@ -80,91 +68,271 @@ def find_puck(img):
     # draw the contour
     cv2.drawContours(img_contours, [modified_contour], -1, (0, 255, 0), 2)
 
-    # --- CHANGED: Remove GUI code for headless execution ---
-    # finish = 0
-    # while not finish:
-    #     cv2.imshow('scaling', img_contours)   
-    #     key = cv2.waitKey(0)
-    #     
-    #     # press escape to exit
-    #     if key == 27:
-    #         finish = True
+    finish = 0
+    while not finish:
+        cv2.imshow('scaling', img_contours)   
+        key = cv2.waitKey(0)
+        
+        # press escape to exit
+        if key == 27:
+            finish = True
+    
+    cv2.destroyAllWindows()
+    
+# %% find left side of puck using contours
+
+def homomorphic_filter(img, radius=15, gamma_low=0.5, gamma_high=3000.0):
+    img = np.array(img, dtype=np.float32)
+    img = img + 1  # Avoid log(0); ensures min > 0
+
+    img_log = np.log(img)
+
+    dft = cv2.dft(img_log, flags=cv2.DFT_COMPLEX_OUTPUT)
+    dft_shift = np.fft.fftshift(dft)
+
+    rows, cols = img.shape
+    crow, ccol = rows // 2, cols // 2
+
+    # Create Gaussian high-pass filter
+    x = np.arange(cols)
+    y = np.arange(rows)
+    X, Y = np.meshgrid(x, y)
+    D2 = (X - ccol) ** 2 + (Y - crow) ** 2
+    H = (gamma_high - gamma_low) * (1 - np.exp(-D2 / (2 * radius**2))) + gamma_low
+
+    # Apply same filter to both real and imaginary parts
+    H = H.astype(np.float32)
+    mask = np.dstack([H, H])
+
+    fshift = dft_shift * mask
+    f_ishift = np.fft.ifftshift(fshift)
+    img_back = cv2.idft(f_ishift)
+    img_back = img_back[:, :, 0]  # real part
+    img_back_clipped = np.clip(img_back, a_min=None, a_max=20)  # exp(20) ~ 4.85e8
+    img_exp = np.exp(img_back_clipped) - 1
+    img_exp = np.clip(img_exp, 0, None)
+
+    print("Before normalization:", img_exp.min(), img_exp.max())
+
+    if img_exp.max() - img_exp.min() < 1e-5:
+        print("Image is flat after filtering.")
+        corrected_img = np.zeros_like(img_exp, dtype=np.uint8)
+    else:
+        # Normalize to 0–255
+        img_norm = cv2.normalize(img_exp, None, 0, 255, cv2.NORM_MINMAX)
+        corrected_img = np.uint8(img_norm)
+
+    print("After normalization:", corrected_img.min(), corrected_img.max())
+    return corrected_img
+
+def find_puck_full(img_col, show, frame):
+    
+    # crop image close to puck, with right side of image the center of the impactor
+    
+    img = img_col[:, :, 2]
+    img_col = img_col
+    
+    corrected_img = homomorphic_filter(img)
+    
+    # new height and length of image
+    height2, length2 = img.shape[:2]
+    
+    contours, hierarchy = cv2.findContours(corrected_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    crit = 100 # critical area for contours
+    
+    # only keep large contours
+    large_contours = [c for c in contours if cv2.contourArea(c) > crit]
+        
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7,7))  # adjust size
+    closed = cv2.morphologyEx(corrected_img, cv2.MORPH_CLOSE, kernel)
+
+    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+
+    # Draw the contour onto the mask
+    cv2.drawContours(mask, large_contours, -1, 255, thickness=cv2.FILLED)
+    
+    # Create a kernel for dilation
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))  # adjust size
+    
+    # Dilate the mask
+    dilated_mask = cv2.erode(mask, kernel, iterations=1)
+        
+    # if show == 1:
+    #     finish = 0
+    #     while not finish:
+    #         cv2.imshow('contour image', homomorphic_filter(img))
+    #         cv2.imshow('contours black', dilated_mask)
+    
+    
+    #         key = cv2.waitKey(0)
+            
+    #         # press escape to exit
+    #         if key == 27:
+    #             finish = True
+    
+    # only keep large contours
+    large_contours = [c for c in contours if cv2.contourArea(c) > crit]
+    
+    _, thresh = cv2.threshold(dilated_mask, 130, 200, cv2.THRESH_BINARY)
+    
+    # find contours
+    contours, hierarchy = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    valid_contours = []
+
+    for cnt in contours:
+        # Extract x and y coordinates of all contour points
+        x_coords = cnt[:, 0, 0]
+        y_coords = cnt[:, 0, 1]
+        
+        # Check if any point touches left or bottom
+        touches_left = np.any(x_coords <= 0)
+        touches_bottom = np.any(y_coords >= height2 - 1)
+        
+        if touches_left or touches_bottom:
+            continue  # skip this contour
+        else:
+            valid_contours.append(cnt)
+        
+    M = cv2.moments(cnt)
+    if M["m00"] != 0:
+        cX = int(M["m10"] / M["m00"])
+        cY = int(M["m01"] / M["m00"])
+    else:
+        cX, cY = 0, 0  # fallback
+    
+    center = np.array([cX, cY])
+    
+    # Scale factor (e.g., 1.2 for 20% increase)
+    scale = 1.03
+    
+    # Reshape for processing
+    cnt_points = cnt.reshape(-1, 2)
+    
+    # Scale each point
+    scaled_points = (cnt_points - center) * scale + center
+    scaled_points = scaled_points.astype(np.int32).reshape(-1, 1, 2)
+    
+    # Draw scaled contour
+    mask = cv2.drawContours(mask.copy(), [scaled_points], -1, (0, 0, 255), 2)  # scaled: red
+
+    kernel_size = 10
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    processed_mask = cv2.erode(mask, kernel, iterations=1)
+    
+    # Remove thin parts
+    cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    # cv2.imshow("Scaled Contour", blank)
+    # cv2.waitKey(0)
     # cv2.destroyAllWindows()
+    
+    cleaned_contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    valid_contours = []
+
+    for cnt in cleaned_contours:
+        # Extract x and y coordinates of all contour points
+        x_coords = cnt[:, 0, 0]
+        y_coords = cnt[:, 0, 1]
+        
+        M = cv2.moments(cnt)
+        if M["m00"] != 0:
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+        
+        # Check if any point touches left or bottom
+        touches_left = np.any(x_coords <= 0)
+        touches_bottom = np.any(y_coords >= height2 - 1)
+        
+        if cY < height2 / 2:
+            continue
+        elif touches_left or touches_bottom:
+            continue  # skip this contour
+        else:
+            valid_contours.append(cnt)
+    
+    # Get final contour
+    if valid_contours:
+        max_cnt = max(valid_contours, key=cv2.contourArea)
+    else:
+        print("No contours found in cleaned mask")
+        return None
+    
+    # Draw cleaned contours for visualization
+    final_mask = np.zeros_like(mask)
+    cv2.drawContours(final_mask, [max_cnt], -1, 255, thickness=cv2.FILLED)
+    
+    if show == 1:
+        finish = 0
+        while not finish:
+            
+            # filled = np.zeros(img.shape[:2], dtype=np.uint8)
+            
+            # cv2.drawContours(filled, [scaled_points], -1, 255, thickness=cv2.FILLED)
+
+            # cv2.imshow('R', img_col[:,:,0])
+            # cv2.imshow('G', img_col[:,:,1])
+            # cv2.imshow('B', img_col[:,:,2])
+            # cv2.imshow('contour image', output_image)
+            cv2.imshow('img2', final_mask)
+            # cv2.imshow('blurred', intersection_mask1)
+            # cv2.imshow('unblurred', intersection_mask2)
+
+
+            key = cv2.waitKey(0)
+            
+            # press escape to exit
+         
+            if key == 27:
+                finish = True
+            
+            cv2.destroyAllWindows()
+        
+    if show == 2:
+        f = frame.strip('.jpg')
+        # cv2.imshow(f'{f}', img_col)
+        # cv2.waitKey(500)
+        
+        cv2.destroyAllWindows()
+        
+        cv2.imwrite(f'E:\\STG\\Jupyter Notebook\\training\\images\\{frame}', img_col)
+        
+        cv2.imshow(f'{f}', final_mask)
+        
+        cv2.waitKey(500)
+        
+        cv2.imwrite(f'E:\\STG\\Jupyter Notebook\\training\\masks\\{frame}', final_mask)
+        
+        cv2.destroyAllWindows()
+
+find_puck_full(cropped, 1, '0')
 
 # %% find first frame of moving impactor
 
-# --- ADDED: Blurring in calculate_mse ---
 def calculate_mse(img1, img2):
-    # Apply Gaussian blur to both images before MSE
-    img1_blur = cv2.GaussianBlur(img1, BLUR_KERNEL, 0)
-    img2_blur = cv2.GaussianBlur(img2, BLUR_KERNEL, 0)
-    return np.mean((img1_blur - img2_blur) ** 2)
-# --- END ADDED ---
-
-# --- UPDATED: Robust motion detection with smoothing and consecutive frames ---
-def detect_motion_start(mse_scores, threshold_factor=THRESHOLD_FACTOR, consecutive_frames=CONSECUTIVE_FRAMES, rolling_window=ROLLING_WINDOW):
-    """
-    Detects the start of motion by finding the first frame where the smoothed MSE
-    rises above a baseline threshold for several consecutive frames.
-    """
-    mse_smooth = pd.Series(mse_scores).rolling(rolling_window, min_periods=1, center=True).mean().values
-    baseline_window = max(50, len(mse_smooth)//20)
-    baseline_mean = np.mean(mse_smooth[:baseline_window])
-    baseline_std = np.std(mse_smooth[:baseline_window])
-    threshold = baseline_mean + threshold_factor * baseline_std
-    above = mse_smooth > threshold
-    # --- ADDED: Debug prints for new approach ---
-    print(f"Baseline mean: {baseline_mean}, std: {baseline_std}, threshold: {threshold}")
-    print(f"First 30 smoothed MSE: {mse_smooth[:30]}")
-    print(f"First 30 'above' values: {above[:30]}")
-    # --- END ADDED ---
-    for i in range(len(above) - consecutive_frames + 1):
-        if np.all(above[i:i+consecutive_frames]):
-            return i
-    return 0  # fallback
-# --- END UPDATED ---
+    return np.mean((img1 - img2) ** 2)
 
 def find_compression(image_folder, test_info):
-    # --- ADDED: Debug prints ---
-    print("Starting find_compression function...")
-    # --- END ADDED ---
-    
-    # --- ADDED: Convert test_info to dict for multiprocessing ---
-    test_info_dict = test_info.to_dict('records')[0] if hasattr(test_info, 'to_dict') else dict(test_info)
-    # --- END ADDED ---
     
     # initial image
     img_init = cv2.imread(os.path.join(image_folder, images[0]))
-    # --- ADDED: Debug print ---
-    print(f"Initial image shape: {img_init.shape if img_init is not None else 'None'}")
-    # --- END ADDED ---
     
     # crop image
     img_init = img_init[crop_top:-crop_bottom, crop_left:crop_right]
-    # --- ADDED: Debug print ---
-    print(f"Cropped initial image shape: {img_init.shape}")
-    # --- END ADDED ---
     
     # black and white image
     gray = cv2.cvtColor(img_init, cv2.COLOR_BGR2GRAY)
-    # --- ADDED: Debug print ---
-    print(f"Grayscale image shape: {gray.shape}")
-    # --- END ADDED ---
 
     # number of images to analyze
     num_frames = len(images)
-    # --- ADDED: Debug print ---
-    print(f"Number of frames to process: {num_frames}")
-    # --- END ADDED ---
 
     # array to score mse of every image from initial frame
     mse_scores = np.ndarray(num_frames)
     
     # number of processes, determined by cpu
     num = mp.cpu_count() - 1
-    # --- ADDED: Debug print ---
-    print(f"Using {num} processes for multiprocessing")
-    # --- END ADDED ---
     
     # split images into num sections of equal length (last section might be short)
     len_sublist, remainder = divmod(num_frames, num) # number of frames in each sublist (and remainder)
@@ -183,239 +351,197 @@ def find_compression(image_folder, test_info):
         
         s = end[i]
 
-    # --- ADDED: Debug print ---
-    print("About to start multiprocessing...")
-    # --- END ADDED ---
-
     with mp.Manager() as manager:
+
         mse_scores_manager = manager.list(mse_scores)
-        # --- CHANGED: Pass test_info_dict instead of test_info ---
+        
+        # zip arguments together for each video to be checked
         tasks = list(zip([images[s_idx:e_idx] for (s_idx, e_idx) in (zip(start, end))],
                          start,
                          [img_init] * num,
                          [image_folder] * num,
                          [mse_scores_manager] * num,
-                         [test_info_dict] * num,
-                         [crop_top] * num,
-                         [crop_bottom] * num,
-                         [crop_left] * num,
-                         [crop_right] * num))
-        # --- END CHANGED ---
+                         [test_info] * num))
+                
         # make pool
         with mp.Pool(processes=num) as pool:
+    
             # send all processes to analyze video
             pool.starmap(worker, tasks)
+        
         # save all mse scores
         mse_scores = np.array(list(mse_scores_manager))
-
-    # --- CHANGED: Use robust motion detection ---
-    start_compression = detect_motion_start(mse_scores)
-    # --- ADDED: Print detected start index for motion ---
-    print(f"Detected start index for motion (MSE): {start_compression}")
-    # --- END ADDED ---
-    # --- END CHANGED ---
-
+    
+    # compression begins at first increase in mse
+    # NEED TO FIX THIS LINE, NOT SURE YET HOW TO DEFINE START OF COMPRESSION
+    start_compression = mse_scores.argmin()
+    
     fig, axs = plt.subplots()
-    plt.scatter(range(len(images)), mse_scores)
-    plt.vlines(start_compression, mse_scores.min(), mse_scores.max(), 'k', label='Start of motion')
+    
+    plt.scatter(len(images),
+                mse_scores)
+    
+    plt.vlines(start_compression, mse_scores.min(), mse_scores.max(), 'k')
+    
     plt.ylabel('MSE')
-    plt.xlabel('Frame index')
-    plt.legend()
+    
+    plt.xlabel('time [s]')
+    
     plt.show()
     
     mse_folder = os.path.join(f"E:\\STG\\Videos\\MSE")
+    
     if not os.path.exists(mse_folder):
         os.mkdir(mse_folder)
+    
     fig.savefig(os.path.join(mse_folder, f'C{video}_MSE'), dpi=300)
+    
     mse_save_folder = 'MSE'
+    
     mse_df = pd.DataFrame(
         {'frames': [int(i.split('_')[-1].strip('.jpg')) for i in images],
          'mse': mse_scores})
+    
     mse_df.to_csv(os.path.join(mse_save_folder, f'C{video}_MSE.csv'))
+    
     print(f'{test_info.date} trial {test_info.trial}, compression occurs at by frame {start_compression}')
-    # --- ADDED: Print detected start of motion ---
-    print(f"Detected start of motion at frame: {start_compression}")
-    # --- END ADDED ---
+
     return start_compression
 
-def worker(captures, start, control, frame_folder, mse_scores_manager, test_info_dict, crop_top, crop_bottom, crop_left, crop_right):
+def worker(captures, start, control, frame_folder, mse_scores_manager, test_info):
+        
     for idx, i in enumerate(captures, start=start):
+        
         img = cv2.imread(os.path.join(frame_folder, i))
-        # --- CHANGED: Use passed crop variables ---
-        img = img[crop_top:-crop_bottom, crop_left:crop_right]
-        # --- ADDED: Apply Gaussian blur before MSE (handled in calculate_mse now) ---
-        # --- END ADDED ---
+                                
         mse_scores_manager[idx] = calculate_mse(control, img)
-        # --- CHANGED: Use test_info_dict instead of test_info ---
-        print(f'Processed video {test_info_dict.get("video", "unknown")}, frame {idx}', flush=True)
-        # --- END CHANGED ---
+        
+        print(f'Processed video {test_info.video}, frame {idx}', flush=True)
 
 
 # %% set up program
 
 # designate folder to get images from
-date = 'C2225_frames'  # Updated to match the extracted frames folder
+date = '2025-07-21'
 video = 'C2225'
 
-# Use the absolute path to the frames folder in the current directory
-image_folder = os.path.join(os.path.dirname(__file__), date)
+image_folder = f"E:\\STG\\Videos\\{date}\\{video}"
 
 # array of image names
 images = [img for img in os.listdir(image_folder) if img.endswith(".jpg")]
 
 # %% get test info
 
-# --- CHANGED: Use absolute path for test info file ---
-test_info_path = os.path.join(os.path.dirname(__file__), '2025-07-18_test_info.csv')
-test_info = pd.read_csv(test_info_path)
-# --- END CHANGED ---
+# all trials
+test_info = pd.read_csv('test_info\\2025-07-18_test_info.csv')
 
 # this trial
-#data = test_info[test_info.video == float(video.strip('C'))]
+data = test_info[test_info.video == float(video.strip('C'))]
 
 fps = 120 # frames per second of video
 dt = 1.0 / fps # time between frames (seconds)
 
-# --- CHANGED: Wrap main execution in if __name__ == '__main__' for Windows multiprocessing safety ---
-if __name__ == '__main__':
-    # --- ADDED: Debug print ---
-    print("Starting main execution...")
-    # --- END ADDED ---
+# %% make folder to store analyzed images
+
+os.mkdir(f"E:\\STG\\Videos\\COMPRESSION_ANALYSIS\\{video}")
+
+# %% crop image
+
+# read in example image of impactor
+example_img = cv2.imread(image_folder + '\\' + images[50])
+
+height, length, _ = example_img.shape # height and length of image
+
+# coordinates for line to draw on image (scale bar)
+top = 1000
+bottom = top
+left = 1470
+right = 2450
+
+# show image to verify line is drawn correctly, adjust as necessary
+control_col = example_img
+scale = 0.3
+
+# convert control image to grayscale
+control_gray = cv2.cvtColor(control_col, cv2.COLOR_BGR2GRAY)
+
+# draw line
+cv2.line(control_gray, (left, top), (right, bottom), 255, 10)
+
+# crop image
+top_t = 250
+bottom_t = height
+left_t = 1000
+right_t = 3000
+
+t_length = right_t - left_t
+t_height = bottom_t - top_t
+
+cropped = cv2.resize(control_col[top_t:bottom_t,left_t:right_t], (int(t_length*scale), int(t_height*scale)))
+cropped_gray = cv2.resize(control_gray[top_t:bottom_t,left_t:right_t], (int(t_length*scale), int(t_height*scale)))
+
+finish = 0
+while not finish:
+    cv2.imshow('scaling', cropped_gray)   
+    key = cv2.waitKey(0)
     
-    # %% make folder to store analyzed images
-    output_folder = os.path.join(os.path.dirname(__file__), f"{video}_analysis")
-    if not os.path.exists(output_folder):
-        os.mkdir(output_folder)
-    # --- ADDED: Debug print ---
-    print("Created output folder")
-    # --- END ADDED ---
+    # press escape to exit
+    if key == 27:
+        finish = True
 
-    # %% crop image
-    example_img = cv2.imread(os.path.join(image_folder, images[100]))
-    if example_img is None:
-        raise FileNotFoundError(f"Could not read example image: {os.path.join(image_folder, images[100])}")
-    # --- ADDED: Debug print ---
-    print("Read example image successfully")
-    # --- END ADDED ---
+cv2.destroyAllWindows()
 
-    height, length, _ = example_img.shape # height and length of image
-    # --- ADDED: Debug print ---
-    print(f"Example image shape: {example_img.shape}")
-    # --- END ADDED ---
+# width of impactor in mm
+scale_mm = 25.4
 
-    # coordinates for line to draw on image (scale bar)
-    top = 1000
-    bottom = top
-    left = 1550
-    right = 2530
+# mm per pixel, from scale bar
+mm_length = 25.4 / get_dist((left, top), (right, bottom))
 
-    # show image to verify line is drawn correctly, adjust as necessary
-    control_col = example_img
-    scale = 0.3
+# center of impactor
+impactor_center = int((right - left) * scale / 2)
 
-    # convert control image to grayscale
-    control_gray = cv2.cvtColor(control_col, cv2.COLOR_BGR2GRAY)
-    # --- ADDED: Debug print ---
-    print("Converted control image to grayscale")
-    # --- END ADDED ---
+# left side of impactor
+impactor_left = int((left - left_t) * scale)
 
-    # --- ADDED: Save sample grayscale images for verification ---
-    test_images_folder = os.path.join(os.path.dirname(__file__), 'test_images')
-    if not os.path.exists(test_images_folder):
-        os.makedirs(test_images_folder)
-    # Save initial, mid, and last grayscale frames
-    sample_indices = [0, len(images)//2, len(images)-1]
-    for idx in sample_indices:
-        img_path = os.path.join(image_folder, images[idx])
-        img = cv2.imread(img_path)
-        if img is not None:
-            gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            out_path = os.path.join(test_images_folder, f'gray_frame_{idx}.png')
-            cv2.imwrite(out_path, gray_img)
-            print(f"Saved grayscale image: {out_path}")
-        else:
-            print(f"Could not read image for grayscale save: {img_path}")
-    # --- END ADDED ---
-    # --- ADDED: Debug print ---
-    print("Finished saving test images")
-    # --- END ADDED ---
+print(f'mm/pixel: {mm_length}')
 
-    # draw line
-    cv2.line(control_gray, (left, top), (right, bottom), 255, 10)
-    # --- ADDED: Debug print ---
-    print("Drew line on control image")
-    # --- END ADDED ---
+# %% find puck
 
-    # crop image
-    top_t = 250
-    bottom_t = height
-    left_t = 1000
-    right_t = 3000
+find_puck(cropped)
 
-    t_length = right_t - left_t
-    t_height = bottom_t - top_t
+# %%
 
-    imS = cv2.resize(control_gray[top_t:bottom_t,left_t:right_t], (int(t_length*scale), int(t_height*scale)))
-    # --- ADDED: Debug print ---
-    print("Resized cropped image")
-    # --- END ADDED ---
+for idx, i in enumerate(images[:1500]):
+    
+    # if idx % 50 != 0:
+    #     continue
+    
+    img = cv2.imread(image_folder + '\\' + i)
+    
+    img = cv2.resize(img[top_t:bottom_t,left_t:right_t], (int(t_length*scale), int(t_height*scale)))    
+    
+    print(i)
+    
+    find_puck_full(img, 2, i)
 
-    # --- CHANGED: Remove GUI code for headless execution ---
-    # finish = 0
-    # while not finish:
-    #     cv2.imshow('scaling', imS)   
-    #     key = cv2.waitKey(0)
-    #     # press escape to exit
-    #     if key == 27:
-    #         finish = True
-    # cv2.destroyAllWindows()
-    # --- END CHANGED ---
+# %% EDIT THIS FUNCTION
+# goes through every frame of video, calculating mse with initial frame
+# (also calls find_puck for every frame of video)
+# save the contour and mse for each frame in a dataframe
+# use mse to identify the frame at which compression starts
 
-    # width of impactor in mm
-    scale_mm = 25.4
+find_compression(image_folder, test_info)
 
-    # mm per pixel, from scale bar
-    mm_length = 25.4 / get_dist((left, top), (right, bottom))
+# %% WRITE THIS FUNCTION
+# choose a y-location somewhere along the puck
+# goes through dataframe, calculating width of puck at that y-location for each frame
 
-    # center of impactor
-    impactor_center = int((right - left) * scale / 2)
+# %% WRITE THIS FUNCTION
+# plot left side of contour as a function of time
 
-    # left side of impactor
-    impactor_left = int((left - left_t) * scale)
+# %% WRITE THIS SECTION
+# plot width of puck at a certain y-location as a function of time
 
-    print(f'mm/pixel: {mm_length}')
-    # --- ADDED: Debug print ---
-    print("About to call find_puck...")
-    # --- END ADDED ---
+# %% save dataframe as .csv
 
-    # %% find puck
-    find_puck(imS)
-    # --- ADDED: Debug print ---
-    print("Finished find_puck")
-    # --- END ADDED ---
-
-    # --- ADDED: Debug print ---
-    print("About to call find_compression...")
-    # --- END ADDED ---
-
-    # %% EDIT THIS FUNCTION
-    # goes through every frame of video, calculating mse with initial frame
-    # (also calls find_puck for every frame of video)
-    # save the contour and mse for each frame in a dataframe
-    # use mse to identify the frame at which compression starts
-    find_compression(image_folder, test_info)
-    # --- END CHANGED ---
-
-    # %% WRITE THIS FUNCTION
-    # choose a y-location somewhere along the puck
-    # goes through dataframe, calculating width of puck at that y-location for each frame
-
-    # %% WRITE THIS FUNCTION
-    # plot left side of contour as a function of time
-
-    # %% WRITE THIS SECTION
-    # plot width of puck at a certain y-location as a function of time
-
-    # %% save dataframe as .csv
-    # rad.to_csv(f'Compression analysis\\{video}_compression.csv')
-# --- END CHANGED ---
+rad.to_csv(f'Compression analysis\\{video}_compression.csv')
