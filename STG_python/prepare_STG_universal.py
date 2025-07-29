@@ -50,6 +50,9 @@ def save_test_info():
         
 # import info about all tests
 def setup_program():
+    # Get the directory where this script is located (STG/STG-python)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     # read in file with basic information about each trial
     test_codes = pd.read_csv(code_file)
                                     
@@ -110,7 +113,7 @@ def setup_program():
     globals()['air_names'] = [i for i in os.listdir(os.path.join(file_folder,'AIR')) if '.TXT' in i]
     
     # define new dataframe for air test info
-    globals()['air_info'] = pd.read_csv('air_test_codes.csv')
+    globals()['air_info'] = pd.read_csv(os.path.join(script_dir, 'air_test_codes.csv'))
     
     # check if all air .csv files are already converted
     if len([i for i in os.listdir(os.path.join(file_folder,'AIR','CSV')) if '.csv' in i]) == len(air_names):
@@ -332,17 +335,14 @@ def main():
     global code_file, info_folder, file_folder, track, track_rows, \
         csv_folder, info_files
     
-    # Get the directory where this script is located (STG/STG-python)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
     # Path to the file with basic trial information (inside STG/STG-python/test_info)
-    code_file = os.path.join(script_dir, 'test_codes (2).csv')
+    code_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_codes (2).csv')
 
     # Folder with test_info files (inside STG/STG-python/test_info)
-    info_folder = os.path.join(script_dir, 'test_info')
+    info_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_info')
 
     # Folder with .TXT files (go up to STG/Zwick)
-    file_folder = os.path.abspath(os.path.join(script_dir, '..', 'Zwick'))
+    file_folder = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'Zwick'))
 
     # Folder with .CSV files inside Zwick
     csv_folder = os.path.join(file_folder, 'CSV')
