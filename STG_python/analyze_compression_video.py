@@ -81,7 +81,7 @@ def find_puck(img):
     
 # %% find left side of puck using contours
 
-def homomorphic_filter(img, radius=15, gamma_low=0.5, gamma_high=3000.0):
+def homomorphic_filter(img, radius=30, gamma_low=0.5, gamma_high=1000.0):
     img = np.array(img, dtype=np.float32)
     img = img + 1  # Avoid log(0); ensures min > 0
 
@@ -129,7 +129,7 @@ def find_puck_full(img_col, show, frame):
     
     # crop image close to puck, with right side of image the center of the impactor
     
-    img = img_col[:, :, 2]
+    img = img_col[:, :, 1]
     img_col = img_col
     
     corrected_img = homomorphic_filter(img)
@@ -217,7 +217,7 @@ def find_puck_full(img_col, show, frame):
     # Draw scaled contour
     mask = cv2.drawContours(mask.copy(), [scaled_points], -1, (0, 0, 255), 2)  # scaled: red
 
-    kernel_size = 10
+    kernel_size = 2
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     processed_mask = cv2.erode(mask, kernel, iterations=1)
     
@@ -227,6 +227,11 @@ def find_puck_full(img_col, show, frame):
     # cv2.imshow("Scaled Contour", blank)
     # cv2.waitKey(0)
     # cv2.destroyAllWindows()
+    
+    cleaned_mask[:, :length2 // 6] = 0
+    cleaned_mask[:, 3 * length2 // 4] = 0
+    cleaned_mask[9 * height2 // 10:] = 0
+
     
     cleaned_contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -245,10 +250,11 @@ def find_puck_full(img_col, show, frame):
         # Check if any point touches left or bottom
         touches_left = np.any(x_coords <= 0)
         touches_bottom = np.any(y_coords >= height2 - 1)
+        touches_right = np.any(x_coords >= length2 - 50)
         
         if cY < height2 / 2:
             continue
-        elif touches_left or touches_bottom:
+        elif touches_left or touches_bottom or touches_right:
             continue  # skip this contour
         else:
             valid_contours.append(cnt)
@@ -275,13 +281,13 @@ def find_puck_full(img_col, show, frame):
             # cv2.imshow('R', img_col[:,:,0])
             # cv2.imshow('G', img_col[:,:,1])
             # cv2.imshow('B', img_col[:,:,2])
-            # cv2.imshow('contour image', output_image)
+            cv2.imshow('contour image', mask)
             cv2.imshow('img2', final_mask)
             # cv2.imshow('blurred', intersection_mask1)
             # cv2.imshow('unblurred', intersection_mask2)
 
 
-            key = cv2.waitKey(0)
+            key = cv2.waitKey(5000)
             
             # press escape to exit
          
@@ -292,20 +298,28 @@ def find_puck_full(img_col, show, frame):
         
     if show == 2:
         f = frame.strip('.jpg')
+        
+        cv2.drawContours(img_col, cleaned_contours, -1, (255, 0, 0), 2)
+        
         # cv2.imshow(f'{f}', img_col)
-        # cv2.waitKey(500)
+        # cv2.waitKey(0)
         
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
         
-        cv2.imwrite(f'E:\\STG\\Jupyter Notebook\\training\\images\\{frame}', img_col)
+        # cv2.imwrite(f'E:\\STG\\Jupyter Notebook\\training\\images\\{frame}', img_col)
         
-        cv2.imshow(f'{f}', final_mask)
+        # cv2.imwrite(f'E:\\STG\\Videos\\COMPRESSION_ANALYSIS\\{date}\\{frame}', img_col)
         
-        cv2.waitKey(500)
+        # cv2.imshow(f'{f}', final_mask)
         
-        cv2.imwrite(f'E:\\STG\\Jupyter Notebook\\training\\masks\\{frame}', final_mask)
+        # cv2.waitKey(0)
         
-        cv2.destroyAllWindows()
+        # cv2.imwrite(f'E:\\STG\\Jupyter Notebook\\training\\masks\\{frame}', final_mask)
+        
+        cv2.imwrite(f'E:\\STG\\Videos\\COMPRESSION_ANALYSIS\\{video}\\{frame}', final_mask)
+
+        
+        # cv2.destroyAllWindows()
 
 find_puck_full(cropped, 1, '0')
 
@@ -422,8 +436,8 @@ def worker(captures, start, control, frame_folder, mse_scores_manager, test_info
 # %% set up program
 
 # designate folder to get images from
-date = '2025-07-21'
-video = 'C2225'
+date = '2025-07-22'
+video = 'C2253'
 
 image_folder = f"E:\\STG\\Videos\\{date}\\{video}"
 
@@ -511,7 +525,7 @@ find_puck(cropped)
 
 # %%
 
-for idx, i in enumerate(images[:1500]):
+for idx, i in enumerate(images):
     
     # if idx % 50 != 0:
     #     continue
