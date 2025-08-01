@@ -96,8 +96,8 @@ def detect_ground_and_press(image_path):
     print(f"Ground position: {ground_y}, Press position: {press_y}")
     return ground_y, press_y
 
-def extract_contour_from_image_both_sides(image_path, threshold=128, margin=100):
-    """Extract contour shape from both left and right sides"""
+def extract_contour_from_image_both_sides(image_path, threshold=80, margin=100):
+    """Extract contour shape from both left and right sides, scanning from center up and down"""
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         print(f"Could not load image: {image_path}")
@@ -105,6 +105,19 @@ def extract_contour_from_image_both_sides(image_path, threshold=128, margin=100)
     
     height, width = img.shape
     middle_x = width // 2
+    
+    # Detect ground and press to find the center region
+    ground_y, press_y = detect_ground_and_press(image_path)
+    
+    if ground_y is None or press_y is None:
+        print("Could not detect ground and press positions")
+        return None, None
+    
+    # Calculate the center y-position (middle of puck)
+    center_y = (ground_y + press_y) // 2
+    print(f"Center y-position: {center_y} (ground: {ground_y}, press: {press_y})")
+    
+    # Initialize contour arrays
     right_contour_points = []
     left_contour_points = []
     
@@ -112,41 +125,95 @@ def extract_contour_from_image_both_sides(image_path, threshold=128, margin=100)
     last_left_x = middle_x
     last_right_x = middle_x
     
-    for y in range(height):
-        # Left contour: first white pixel when scanning left to right
-        first_white_x_left = middle_x
-        for x in range(margin, width - margin):
-            if img[y, x] >= threshold:
-                first_white_x_left = x
-                break
+    # Scan UP from center to press (top of puck)
+    print("Scanning UP from center to press...")
+    for y in range(center_y, press_y - 1, -1):  # Go up (decreasing y)
+        # Adaptive threshold based on region
+        if y < center_y - 50:  # Top region (well-lit)
+            adaptive_threshold = 128
+        else:  # Center region
+            adaptive_threshold = 100
         
-        # Right contour: last white pixel when scanning left to right
-        last_white_x_right = middle_x
-        for x in range(margin, width - margin):
-            if img[y, x] >= threshold:
-                last_white_x_right = x
+        # Find left and right edges
+        left_edge, right_edge = find_edges_in_row(img, y, margin, width, adaptive_threshold, last_left_x, last_right_x)
         
-        # Check for jumps to center and fix them (more conservative)
-        if abs(first_white_x_left - last_left_x) > 100:  # Only fix very large jumps
-            # Only fix if the new position is closer to center than the last position
-            if abs(first_white_x_left - middle_x) < abs(last_left_x - middle_x):
-                first_white_x_left = last_left_x  # Keep the edge position
-        
-        if abs(last_white_x_right - last_right_x) > 100:  # Only fix very large jumps
-            # Only fix if the new position is closer to center than the last position
-            if abs(last_white_x_right - middle_x) < abs(last_right_x - middle_x):
-                last_white_x_right = last_right_x  # Keep the edge position
+        # Apply jump prevention
+        left_edge = prevent_jump_to_center(left_edge, last_left_x, middle_x)
+        right_edge = prevent_jump_to_center(right_edge, last_right_x, middle_x)
         
         # Update last valid positions only if we found a real edge
-        if first_white_x_left != middle_x:
-            last_left_x = first_white_x_left
-        if last_white_x_right != middle_x:
-            last_right_x = last_white_x_right
+        if left_edge != middle_x:
+            last_left_x = left_edge
+        if right_edge != middle_x:
+            last_right_x = right_edge
         
-        left_contour_points.append((y, first_white_x_left))
-        right_contour_points.append((y, last_white_x_right))
+        left_contour_points.append((y, left_edge))
+        right_contour_points.append((y, right_edge))
+    
+    # Reset tracking for downward scan
+    last_left_x = middle_x
+    last_right_x = middle_x
+    
+    # Scan DOWN from center to ground (bottom of puck)
+    print("Scanning DOWN from center to ground...")
+    for y in range(center_y, ground_y + 1):  # Go down (increasing y)
+        # Adaptive threshold based on region
+        if y > center_y + 50:  # Bottom region (shadows)
+            adaptive_threshold = 20
+        else:  # Center region
+            adaptive_threshold = 100
+        
+        # Find left and right edges
+        left_edge, right_edge = find_edges_in_row(img, y, margin, width, adaptive_threshold, last_left_x, last_right_x)
+        
+        # Apply jump prevention
+        left_edge = prevent_jump_to_center(left_edge, last_left_x, middle_x)
+        right_edge = prevent_jump_to_center(right_edge, last_right_x, middle_x)
+        
+        # Update last valid positions only if we found a real edge
+        if left_edge != middle_x:
+            last_left_x = left_edge
+        if right_edge != middle_x:
+            last_right_x = right_edge
+        
+        left_contour_points.append((y, left_edge))
+        right_contour_points.append((y, right_edge))
+    
+    # Sort by y-coordinate to ensure proper order
+    left_contour_points.sort(key=lambda p: p[0])
+    right_contour_points.sort(key=lambda p: p[0])
     
     return np.array(right_contour_points), np.array(left_contour_points)
+
+def find_edges_in_row(img, y, margin, width, threshold, last_left_x, last_right_x):
+    """Find left and right edges in a single row"""
+    # Left contour: first white pixel when scanning left to right
+    left_edge = None
+    for x in range(margin, width - margin):
+        if img[y, x] >= threshold:
+            left_edge = x
+            break
+    
+    # Right contour: last white pixel when scanning left to right
+    right_edge = None
+    for x in range(margin, width - margin):
+        if img[y, x] >= threshold:
+            right_edge = x
+    
+    # If no edge found, use the last known good position
+    if left_edge is None:
+        left_edge = last_left_x
+    if right_edge is None:
+        right_edge = last_right_x
+    
+    return left_edge, right_edge
+
+def prevent_jump_to_center(current_x, last_x, middle_x, jump_threshold=20):
+    """Prevent contour from jumping to center"""
+    if abs(current_x - last_x) > jump_threshold:
+        if abs(current_x - middle_x) < abs(last_x - middle_x):
+            return last_x  # Keep the edge position
+    return current_x
 
 def smooth_contour(contour_points, window_length=21, polyorder=2):
     """Smooth contour using Savitzky-Golay filter"""
@@ -230,11 +297,11 @@ def process_all_images(analysis_folder, output_folder=None, max_images=10):
     for i, image_path in enumerate(image_files):
         print(f"\nProcessing image {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
         
-        # Detect ground and press positions
-        ground_y, press_y = detect_ground_and_press(image_path)
-        
-        # Extract contours
+        # Extract contours (ground/press detection is now done inside this function)
         right_contour, left_contour = extract_contour_from_image_both_sides(image_path)
+        
+        # Get ground and press positions for plotting
+        ground_y, press_y = detect_ground_and_press(image_path)
         
         if left_contour is not None and right_contour is not None:
             # Combine contours for analysis
