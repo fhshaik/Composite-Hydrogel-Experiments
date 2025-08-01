@@ -87,11 +87,13 @@ def detect_ground_and_press(image_path):
     ground_y = horizontal_y_positions[0] if horizontal_y_positions else None
     press_y = horizontal_y_positions[1] if len(horizontal_y_positions) > 1 else None
     
-    # Convert back to original image space
+    # Convert back to original image space and apply offsets
     if ground_y is not None:
         ground_y += crop_start
+        ground_y -= 6  # Move ground line 6 pixels up
     if press_y is not None:
         press_y += crop_start
+        press_y += 20  # Move press line 20 pixels down
     
     print(f"Ground position: {ground_y}, Press position: {press_y}")
     return ground_y, press_y
@@ -194,11 +196,12 @@ def find_edges_in_row(img, y, margin, width, threshold, last_left_x, last_right_
             left_edge = x
             break
     
-    # Right contour: last white pixel when scanning left to right
+    # Right contour: last white pixel when scanning right to left
     right_edge = None
-    for x in range(margin, width - margin):
+    for x in range(width - margin - 1, margin - 1, -1):  # Scan right to left
         if img[y, x] >= threshold:
             right_edge = x
+            break
     
     # If no edge found, use the last known good position
     if left_edge is None:
@@ -228,6 +231,43 @@ def smooth_contour(contour_points, window_length=21, polyorder=2):
     except:
         print("Smoothing failed, returning original contour")
         return contour_points
+
+def find_centerline(left_contour, right_contour, ground_y, press_y):
+    """Find the average horizontal centerline between left and right contours"""
+    if left_contour is None or right_contour is None:
+        return None
+    
+    # Filter contours to only include points within ground/press region
+    left_filtered = []
+    right_filtered = []
+    
+    for point in left_contour:
+        y, x = point
+        if press_y <= y <= ground_y:
+            left_filtered.append((y, x))
+    
+    for point in right_contour:
+        y, x = point
+        if press_y <= y <= ground_y:
+            right_filtered.append((y, x))
+    
+    if not left_filtered or not right_filtered:
+        return None
+    
+    # Convert to numpy arrays
+    left_array = np.array(left_filtered)
+    right_array = np.array(right_filtered)
+    
+    # Calculate average horizontal position
+    all_x_positions = np.concatenate([left_array[:, 1], right_array[:, 1]])
+    center_x = np.mean(all_x_positions)
+    
+    # Create vertical centerline from press to ground
+    centerline = []
+    for y in range(int(press_y), int(ground_y) + 1):
+        centerline.append((y, center_x))
+    
+    return np.array(centerline)
 
 def analyze_contour_shape(contour_points):
     """Analyze the contour shape and extract features"""
@@ -277,6 +317,104 @@ def plot_contour_analysis(image_path, left_contour=None, right_contour=None, gro
     
     plt.show()
 
+def plot_contour_distances(left_contour, right_contour, ground_y, press_y, save_path=None):
+    """Plot distance from centerline to contours as function of y-position"""
+    if left_contour is None or right_contour is None:
+        print("No contours to plot")
+        return
+    
+    # Find centerline
+    centerline = find_centerline(left_contour, right_contour, ground_y, press_y)
+    
+    if centerline is None:
+        print("Could not find centerline")
+        return
+    
+    # Filter contours to only include points within ground/press region
+    left_filtered = []
+    right_filtered = []
+    
+    for point in left_contour:
+        y, x = point
+        if press_y <= y <= ground_y:
+            left_filtered.append((y, x))
+    
+    for point in right_contour:
+        y, x = point
+        if press_y <= y <= ground_y:
+            right_filtered.append((y, x))
+    
+    if not left_filtered or not right_filtered:
+        print("No contour points in ground/press region")
+        return
+    
+    # Convert to numpy arrays and sort by y-coordinate (bottom to top)
+    left_array = np.array(left_filtered)
+    right_array = np.array(right_filtered)
+    
+    left_array = left_array[left_array[:, 0].argsort()]
+    right_array = right_array[right_array[:, 0].argsort()]
+    
+    # Get centerline x-coordinate
+    center_x = centerline[0, 1]  # All centerline points have same x-coordinate
+    
+    # Calculate distances from centerline to contours
+    y_positions = np.arange(int(press_y), int(ground_y) + 1)  # Y-coordinates (bottom to top)
+    
+    # Interpolate left and right arrays to match y_positions
+    left_distances = []
+    right_distances = []
+    
+    for y_pos in y_positions:
+        # Find closest left point
+        left_idx = np.argmin(np.abs(left_array[:, 0] - y_pos))
+        left_x = left_array[left_idx, 1]
+        
+        # Find closest right point
+        right_idx = np.argmin(np.abs(right_array[:, 0] - y_pos))
+        right_x = right_array[right_idx, 1]
+        
+        left_distances.append(left_x - center_x)
+        right_distances.append(right_x - center_x)
+    
+    left_distances = np.array(left_distances)
+    right_distances = np.array(right_distances)
+    
+    # Smooth the distance data
+    left_distances_smoothed = savgol_filter(left_distances, 21, 2)
+    right_distances_smoothed = savgol_filter(right_distances, 21, 2)
+    
+    # Create the plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Plot 1: Original distance data
+    ax1.plot(y_positions, left_distances, 'g-', linewidth=2, label='Left Contour Distance')
+    ax1.plot(y_positions, right_distances, 'orange', linewidth=2, label='Right Contour Distance')
+    ax1.axhline(y=0, color='blue', linestyle='--', linewidth=2, label='Centerline')
+    ax1.set_xlabel('Y Position (pixels)')
+    ax1.set_ylabel('Distance from Centerline (pixels)')
+    ax1.set_title('Original Distance from Centerline to Contours')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Plot 2: Smoothed distance data
+    ax2.plot(y_positions, left_distances_smoothed, 'g-', linewidth=2, label='Left Contour Distance (Smoothed)')
+    ax2.plot(y_positions, right_distances_smoothed, 'orange', linewidth=2, label='Right Contour Distance (Smoothed)')
+    ax2.axhline(y=0, color='blue', linestyle='--', linewidth=2, label='Centerline')
+    ax2.set_xlabel('Y Position (pixels)')
+    ax2.set_ylabel('Distance from Centerline (pixels)')
+    ax2.set_title('Smoothed Distance from Centerline to Contours')
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Contour distance plot saved to: {save_path}")
+    
+    plt.show()
+
 def process_all_images(analysis_folder, output_folder=None, max_images=10):
     """Process all images in the analysis folder"""
     image_files = load_analysis_images(analysis_folder)
@@ -319,14 +457,21 @@ def process_all_images(analysis_folder, output_folder=None, max_images=10):
                 'press_y': press_y
             })
             
-            # Create plot
+            # Create plots
             if output_folder:
+                # Original contour plot
                 plot_filename = f"contour_analysis_{i+1:03d}.png"
                 plot_path = os.path.join(output_folder, plot_filename)
                 plot_contour_analysis(image_path, left_contour, right_contour, ground_y, press_y, plot_path)
+                
+                # Contour distance plot
+                distance_filename = f"contour_distances_{i+1:03d}.png"
+                distance_path = os.path.join(output_folder, distance_filename)
+                plot_contour_distances(left_contour, right_contour, ground_y, press_y, distance_path)
             else:
                 if i < 3:  # Only show first 3 plots
                     plot_contour_analysis(image_path, left_contour, right_contour, ground_y, press_y)
+                    plot_contour_distances(left_contour, right_contour, ground_y, press_y)
     
     return results
 
