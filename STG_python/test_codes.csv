@@ -263,8 +263,8 @@ date,trial,video,depth,velocity,wait_time,return,gel,particle,gel_wt,particle_wt
 2025-07-17,16,0,5,3,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
 2025-07-17,17,C2182,5,5,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
 2025-07-17,18,C2183,5,5,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
-2025-07-17,19,0,5,10,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
-2025-07-17,20,0,5,10,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
+2025-07-17,19,C2184,5,10,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
+2025-07-17,20,C2186,5,10,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
 2025-07-17,21,C2187,5,10,60,1,porcine,gb,20,10,water,11,23.0,porcine,gb,20.0,0.0
 2025-07-21,1,C2201,1,1,60,1,porcine,gb,20,10,water,22,24.0,,,,
 2025-07-21,2,C2202,1,1,60,1,porcine,gb,20,10,water,22,24.0,,,,
