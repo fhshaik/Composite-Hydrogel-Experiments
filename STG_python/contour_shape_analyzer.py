@@ -7,6 +7,8 @@ Extracts contour shape by tracing from middle vertical line to last white point
 import os
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent PIL errors
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from scipy.integrate import trapezoid
@@ -27,13 +29,27 @@ def load_analysis_images(folder_path):
     print(f"Found {len(image_files)} images")
     return image_files
 
-def detect_ground_and_press(image_path):
-    """Detect ground and press positions using edge detection"""
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        print(f"Could not load image: {image_path}")
-        return None, None
+def detect_ground_and_press(image_path, fixed_ground_y=None, prev_press_y=None, search_range=15):
+    """Detect ground and press positions using temporal consistency"""
     
+    # Detect ground position (use first frame as reference if available)
+    if fixed_ground_y is not None:
+        ground_y = fixed_ground_y
+    else:
+        ground_y = detect_ground_position_first_frame(image_path)
+    
+    # Detect press position with temporal consistency
+    press_y = detect_press_position_simple_edge(image_path, prev_press_y, search_range)
+    
+    if press_y is None:
+        print("Could not detect press position")
+        return ground_y, None
+    
+    return ground_y, press_y
+
+def detect_ground_position_first_frame(image_path):
+    """Detect ground position in the first frame"""
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     height, width = img.shape
     
     # Crop out the top quarter to eliminate press top section
@@ -54,51 +70,123 @@ def detect_ground_and_press(image_path):
                            minLineLength=width//4, maxLineGap=50)
     
     if lines is None:
-        print("No horizontal lines detected")
-        return None, None
+        print("No horizontal lines detected in first frame")
+        return None
     
-    # Extract and filter horizontal line positions
-    horizontal_y_positions = []
+    # Extract and filter horizontal line positions for ground
+    ground_candidates = []
     for line in lines:
         x1, y1, x2, y2 = line[0]
         if abs(y2 - y1) < 15:  # Nearly horizontal
             y_avg = (y1 + y2) // 2
-            if y_avg > cropped_height * 0.1 and y_avg < cropped_height * 0.9:
-                # Position-based filtering
-                if y_avg < cropped_height * 0.3:  # Upper 30% - likely press
-                    horizontal_y_positions.append(y_avg)
-                elif y_avg > cropped_height * 0.7:  # Lower 30% - likely ground
-                    horizontal_y_positions.append(y_avg)
+            if y_avg > cropped_height * 0.7:  # Lower 30% - likely ground
+                ground_candidates.append(y_avg)
     
-    if len(horizontal_y_positions) < 2:
-        print(f"Not enough horizontal lines found. Found: {len(horizontal_y_positions)}")
-        return None, None
+    if not ground_candidates:
+        print("No ground candidates found in first frame")
+        return None
     
-    # Remove duplicates
-    unique_positions = []
-    for pos in sorted(horizontal_y_positions):
-        if not unique_positions or abs(pos - unique_positions[-1]) > 30:
-            unique_positions.append(pos)
+    # Take the lowest position as ground
+    ground_y = max(ground_candidates)  # Lowest in cropped image
+    ground_y += crop_start  # Convert to original image space
+    ground_y -= 6  # Move ground line 6 pixels up
     
-    horizontal_y_positions = unique_positions
-    horizontal_y_positions.sort(reverse=True)  # Bottom to top
-    
-    # Ground is lowest, press is second lowest
-    ground_y = horizontal_y_positions[0] if horizontal_y_positions else None
-    press_y = horizontal_y_positions[1] if len(horizontal_y_positions) > 1 else None
-    
-    # Convert back to original image space and apply offsets
-    if ground_y is not None:
-        ground_y += crop_start
-        ground_y -= 6  # Move ground line 6 pixels up
-    if press_y is not None:
-        press_y += crop_start
-        press_y += 20  # Move press line 20 pixels down
-    
-    print(f"Ground position: {ground_y}, Press position: {press_y}")
-    return ground_y, press_y
+    return int(ground_y)  # Ensure integer return
 
-def extract_contour_from_image_both_sides(image_path, threshold=80, margin=100):
+def detect_press_position_raw(image_path, prev_press_y=None, search_range=15):
+    """Legacy function - now replaced by detect_press_position_simple_edge"""
+    return detect_press_position_simple_edge(image_path, prev_press_y, search_range)
+
+def count_white_pixels_around_line(img, y_position, margin=10, threshold=128):
+    """Legacy function - no longer used"""
+    return 0, 0
+
+def visualize_adaptive_refinement(img, y_position, margin=10, threshold=128):
+    """Legacy function - no longer used"""
+    return img
+
+def refine_press_position_adaptive(img, initial_y, prev_press_y=None, max_iterations=10):
+    """Legacy function - no longer used"""
+    return initial_y
+
+def detect_press_position_simple_edge(image_path, prev_press_y=None, search_range=15):
+    """
+    Simple press position detection using edge maximization
+    """
+    try:
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            print(f"Could not load image: {image_path}")
+            return None
+        
+        height, width = img.shape
+        
+        # Crop out the top quarter to eliminate press top section
+        crop_start = height // 4
+        cropped_img = img[crop_start:, :]
+        cropped_height = cropped_img.shape[0]
+        
+        # Apply edge detection
+        edges = cv2.Canny(cropped_img, 50, 150)
+        
+        # Find horizontal edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+        horizontal_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        
+        # If we have previous position, search around it
+        if prev_press_y is not None:
+            # Convert to cropped image coordinates
+            prev_y_cropped = prev_press_y - crop_start
+            
+            # Search around previous position
+            search_start = max(0, prev_y_cropped - search_range)
+            search_end = min(cropped_height, prev_y_cropped + search_range)
+            
+            best_y = None
+            max_white_pixels = 0
+            
+            for y in range(search_start, search_end):
+                # Count white pixels (edges) in horizontal line
+                white_pixels = np.sum(horizontal_edges[y, :])
+                
+                if white_pixels > max_white_pixels:
+                    max_white_pixels = white_pixels
+                    best_y = y
+            
+            if best_y is not None and max_white_pixels > width * 0.05:  # At least 5% of width
+                return int(best_y + crop_start)
+            else:
+                # Fall back to previous position
+                return prev_press_y
+        
+        else:
+            # First frame: search in upper half
+            search_start = 0
+            search_end = cropped_height // 2
+            
+            best_y = None
+            max_white_pixels = 0
+            
+            for y in range(search_start, search_end):
+                # Count white pixels (edges) in horizontal line
+                white_pixels = np.sum(horizontal_edges[y, :])
+                
+                if white_pixels > max_white_pixels:
+                    max_white_pixels = white_pixels
+                    best_y = y
+            
+            if best_y is not None and max_white_pixels > width * 0.05:
+                return int(best_y + crop_start)
+            else:
+                return None
+        
+    except Exception as e:
+        print(f"Error in simple edge press detection: {e}")
+        return prev_press_y if prev_press_y is not None else None
+
+
+
+def extract_contour_from_image_both_sides(image_path, threshold=80, margin=100, fixed_ground_y=None, prev_press_y=None):
     """Extract contour shape from both left and right sides, scanning from center up and down"""
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -109,23 +197,43 @@ def extract_contour_from_image_both_sides(image_path, threshold=80, margin=100):
     middle_x = width // 2
     
     # Detect ground and press to find the center region
-    ground_y, press_y = detect_ground_and_press(image_path)
+    ground_y, press_y = detect_ground_and_press(image_path, fixed_ground_y, prev_press_y, search_range=15)
     
     if ground_y is None or press_y is None:
         print("Could not detect ground and press positions")
         return None, None
     
+    # Convert to integers for range operations
+    ground_y = int(ground_y)
+    press_y = int(press_y)
+    
     # Calculate the center y-position (middle of puck)
     center_y = (ground_y + press_y) // 2
     print(f"Center y-position: {center_y} (ground: {ground_y}, press: {press_y})")
+    
+    # Validate that we have a reasonable range
+    if abs(ground_y - press_y) < 10:
+        print("Warning: Ground and press positions are too close together")
+        return None, None
+    
+    # Ensure press_y is less than ground_y (press is above ground)
+    if press_y >= ground_y:
+        print("Warning: Press position is not above ground position")
+        return None, None
+    
+    # Ensure we have valid y-coordinates for scanning
+    if press_y < 0 or ground_y >= height:
+        print("Warning: Press or ground position outside image bounds")
+        return None, None
     
     # Initialize contour arrays
     right_contour_points = []
     left_contour_points = []
     
     # Track the last valid edge positions to avoid jumps
-    last_left_x = middle_x
-    last_right_x = middle_x
+    # Start with None to indicate no previous good positions
+    last_left_x = None
+    last_right_x = None
     
     # Scan UP from center to press (top of puck)
     print("Scanning UP from center to press...")
@@ -139,22 +247,22 @@ def extract_contour_from_image_both_sides(image_path, threshold=80, margin=100):
         # Find left and right edges
         left_edge, right_edge = find_edges_in_row(img, y, margin, width, adaptive_threshold, last_left_x, last_right_x)
         
-        # Apply jump prevention
-        left_edge = prevent_jump_to_center(left_edge, last_left_x, middle_x)
-        right_edge = prevent_jump_to_center(right_edge, last_right_x, middle_x)
+        # Apply jump prevention with side-specific logic
+        left_edge = prevent_jump_to_center(left_edge, last_left_x, middle_x, contour_side='left')
+        right_edge = prevent_jump_to_center(right_edge, last_right_x, middle_x, contour_side='right')
         
-        # Update last valid positions only if we found a real edge
-        if left_edge != middle_x:
+        # Update last valid positions only if we found a real edge (not None)
+        if left_edge is not None and left_edge != middle_x:
             last_left_x = left_edge
-        if right_edge != middle_x:
+        if right_edge is not None and right_edge != middle_x:
             last_right_x = right_edge
         
         left_contour_points.append((y, left_edge))
         right_contour_points.append((y, right_edge))
     
     # Reset tracking for downward scan
-    last_left_x = middle_x
-    last_right_x = middle_x
+    last_left_x = None
+    last_right_x = None
     
     # Scan DOWN from center to ground (bottom of puck)
     print("Scanning DOWN from center to ground...")
@@ -168,14 +276,14 @@ def extract_contour_from_image_both_sides(image_path, threshold=80, margin=100):
         # Find left and right edges
         left_edge, right_edge = find_edges_in_row(img, y, margin, width, adaptive_threshold, last_left_x, last_right_x)
         
-        # Apply jump prevention
-        left_edge = prevent_jump_to_center(left_edge, last_left_x, middle_x)
-        right_edge = prevent_jump_to_center(right_edge, last_right_x, middle_x)
+        # Apply jump prevention with side-specific logic
+        left_edge = prevent_jump_to_center(left_edge, last_left_x, middle_x, contour_side='left')
+        right_edge = prevent_jump_to_center(right_edge, last_right_x, middle_x, contour_side='right')
         
-        # Update last valid positions only if we found a real edge
-        if left_edge != middle_x:
+        # Update last valid positions only if we found a real edge (not None)
+        if left_edge is not None and left_edge != middle_x:
             last_left_x = left_edge
-        if right_edge != middle_x:
+        if right_edge is not None and right_edge != middle_x:
             last_right_x = right_edge
         
         left_contour_points.append((y, left_edge))
@@ -188,7 +296,7 @@ def extract_contour_from_image_both_sides(image_path, threshold=80, margin=100):
     return np.array(right_contour_points), np.array(left_contour_points)
 
 def find_edges_in_row(img, y, margin, width, threshold, last_left_x, last_right_x):
-    """Find left and right edges in a single row"""
+    """Find left and right edges in a single row with improved asymmetric handling"""
     # Left contour: first white pixel when scanning left to right
     left_edge = None
     for x in range(margin, width - margin):
@@ -203,18 +311,56 @@ def find_edges_in_row(img, y, margin, width, threshold, last_left_x, last_right_
             right_edge = x
             break
     
-    # If no edge found, use the last known good position
-    if left_edge is None:
+    # Validate that left and right edges are reasonable
+    if left_edge is not None and right_edge is not None:
+        # Ensure left edge is actually to the left of right edge
+        if left_edge >= right_edge:
+            # This shouldn't happen, but if it does, try to fix
+            print(f"Warning: Left edge ({left_edge}) >= Right edge ({right_edge}) at y={y}")
+            # Try to find a better right edge by looking further left
+            for x in range(left_edge + 1, width - margin):
+                if img[y, x] >= threshold:
+                    right_edge = x
+                    break
+    
+    # If no edge found, use the last known good position (only if not None)
+    if left_edge is None and last_left_x is not None:
         left_edge = last_left_x
-    if right_edge is None:
+    if right_edge is None and last_right_x is not None:
         right_edge = last_right_x
+    
+    # Additional validation: ensure edges are not too close together
+    if left_edge is not None and right_edge is not None:
+        min_separation = 20  # Minimum pixels between left and right edges
+        if right_edge - left_edge < min_separation:
+            print(f"Warning: Edges too close at y={y}: left={left_edge}, right={right_edge}")
+            # Use last known good positions if current ones are too close and last positions are valid
+            if (last_left_x is not None and last_right_x is not None and 
+                abs(last_left_x - last_right_x) >= min_separation):
+                left_edge = last_left_x
+                right_edge = last_right_x
     
     return left_edge, right_edge
 
-def prevent_jump_to_center(current_x, last_x, middle_x, jump_threshold=20):
-    """Prevent contour from jumping to center"""
+def prevent_jump_to_center(current_x, last_x, middle_x, jump_threshold=20, contour_side='left'):
+    """Prevent contour from jumping to center with side-specific logic"""
+    # If last_x is None, we have no previous position to compare against
+    if last_x is None:
+        return current_x
+    
+    # If current_x is None, we have no current position to work with
+    if current_x is None:
+        return last_x
+    
     if abs(current_x - last_x) > jump_threshold:
-        if abs(current_x - middle_x) < abs(last_x - middle_x):
+        # For left contour: should stay on the left side
+        if contour_side == 'left' and current_x > middle_x:
+            return last_x  # Keep the left position
+        # For right contour: should stay on the right side  
+        elif contour_side == 'right' and current_x < middle_x:
+            return last_x  # Keep the right position
+        # If jump is reasonable (not crossing center), allow it
+        elif abs(current_x - middle_x) < abs(last_x - middle_x):
             return last_x  # Keep the edge position
     return current_x
 
@@ -225,16 +371,27 @@ def smooth_contour(contour_points, window_length=21, polyorder=2):
     
     x_coords = contour_points[:, 1]
     try:
+        # Ensure window_length is odd and not larger than data
+        if window_length % 2 == 0:
+            window_length += 1
+        if window_length > len(x_coords):
+            window_length = len(x_coords) - 1 if len(x_coords) > 1 else 1
+        
         smoothed_x = savgol_filter(x_coords, window_length, polyorder)
         smoothed_contour = np.column_stack((contour_points[:, 0], smoothed_x))
         return smoothed_contour
-    except:
-        print("Smoothing failed, returning original contour")
+    except Exception as e:
+        print(f"Smoothing failed: {e}, returning original contour")
         return contour_points
 
 def find_centerline(left_contour, right_contour, ground_y, press_y):
     """Find the average horizontal centerline between left and right contours"""
     if left_contour is None or right_contour is None:
+        return None
+    
+    # Check if ground_y and press_y are valid
+    if ground_y is None or press_y is None:
+        print("Warning: ground_y or press_y is None, cannot find centerline")
         return None
     
     # Filter contours to only include points within ground/press region
@@ -315,12 +472,17 @@ def plot_contour_analysis(image_path, left_contour=None, right_contour=None, gro
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved to: {save_path}")
     
-    plt.show()
+    plt.close()
 
 def plot_contour_distances(left_contour, right_contour, ground_y, press_y, save_path=None):
     """Plot distance from centerline to contours as function of y-position"""
     if left_contour is None or right_contour is None:
         print("No contours to plot")
+        return
+    
+    # Check if ground_y and press_y are valid
+    if ground_y is None or press_y is None:
+        print("Warning: ground_y or press_y is None, cannot plot distances")
         return
     
     # Find centerline
@@ -356,6 +518,9 @@ def plot_contour_distances(left_contour, right_contour, ground_y, press_y, save_
     right_array = right_array[right_array[:, 0].argsort()]
     
     # Get centerline x-coordinate
+    if len(centerline) == 0:
+        print("Centerline is empty")
+        return
     center_x = centerline[0, 1]  # All centerline points have same x-coordinate
     
     # Calculate distances from centerline to contours
@@ -367,12 +532,18 @@ def plot_contour_distances(left_contour, right_contour, ground_y, press_y, save_
     
     for y_pos in y_positions:
         # Find closest left point
-        left_idx = np.argmin(np.abs(left_array[:, 0] - y_pos))
-        left_x = left_array[left_idx, 1]
+        if len(left_array) > 0:
+            left_idx = np.argmin(np.abs(left_array[:, 0] - y_pos))
+            left_x = left_array[left_idx, 1]
+        else:
+            left_x = center_x
         
         # Find closest right point
-        right_idx = np.argmin(np.abs(right_array[:, 0] - y_pos))
-        right_x = right_array[right_idx, 1]
+        if len(right_array) > 0:
+            right_idx = np.argmin(np.abs(right_array[:, 0] - y_pos))
+            right_x = right_array[right_idx, 1]
+        else:
+            right_x = center_x
         
         left_distances.append(left_x - center_x)
         right_distances.append(right_x - center_x)
@@ -381,8 +552,13 @@ def plot_contour_distances(left_contour, right_contour, ground_y, press_y, save_
     right_distances = np.array(right_distances)
     
     # Smooth the distance data
-    left_distances_smoothed = savgol_filter(left_distances, 21, 2)
-    right_distances_smoothed = savgol_filter(right_distances, 21, 2)
+    try:
+        left_distances_smoothed = savgol_filter(left_distances, 21, 2)
+        right_distances_smoothed = savgol_filter(right_distances, 21, 2)
+    except Exception as e:
+        print(f"Smoothing failed: {e}, using original data")
+        left_distances_smoothed = left_distances
+        right_distances_smoothed = right_distances
     
     # Create the plot
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
@@ -413,9 +589,42 @@ def plot_contour_distances(left_contour, right_contour, ground_y, press_y, save_
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Contour distance plot saved to: {save_path}")
     
-    plt.show()
+    plt.close()
 
-def process_all_images(analysis_folder, output_folder=None, max_images=10):
+def visualize_press_height_tracking(image_path, press_y, ground_y, save_path=None):
+    """
+    Visualize press height tracking for debugging
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        return
+    
+    # Draw press line (blue)
+    if press_y is not None:
+        cv2.line(img, (0, press_y), (img.shape[1], press_y), (255, 0, 0), 2)
+        cv2.putText(img, f'Press: {press_y}', (10, press_y - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+    
+    # Draw ground line (red)
+    if ground_y is not None:
+        cv2.line(img, (0, ground_y), (img.shape[1], ground_y), (0, 0, 255), 2)
+        cv2.putText(img, f'Ground: {ground_y}', (10, ground_y + 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    
+    # Draw compression height
+    if press_y is not None and ground_y is not None:
+        compression_height = ground_y - press_y
+        cv2.putText(img, f'Compression: {compression_height}px', (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    if save_path:
+        cv2.imwrite(save_path, img)
+    else:
+        cv2.imshow('Press Height Tracking', img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+def process_all_images(analysis_folder, output_folder=None, max_images=1000):
     """Process all images in the analysis folder"""
     image_files = load_analysis_images(analysis_folder)
     
@@ -432,46 +641,77 @@ def process_all_images(analysis_folder, output_folder=None, max_images=10):
     
     results = []
     
+    # Detect fixed ground position from first frame
+    print("Detecting fixed ground position from first frame...")
+    fixed_ground_y = detect_ground_position_first_frame(image_files[0])
+    if fixed_ground_y is None:
+        print("Could not detect ground position in first frame, using default")
+        fixed_ground_y = 450  # Default ground position
+    
+    print(f"Fixed ground position: {fixed_ground_y}")
+    
+    # Track previous press position and history for temporal consistency
+    prev_press_y = None
+    press_history = []  # Keep last 5 press positions for smoothing
+    
     for i, image_path in enumerate(image_files):
-        print(f"\nProcessing image {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
-        
-        # Extract contours (ground/press detection is now done inside this function)
-        right_contour, left_contour = extract_contour_from_image_both_sides(image_path)
-        
-        # Get ground and press positions for plotting
-        ground_y, press_y = detect_ground_and_press(image_path)
-        
-        if left_contour is not None and right_contour is not None:
-            # Combine contours for analysis
-            combined_contour = np.vstack([left_contour, right_contour[::-1]])
-            smoothed_contour = smooth_contour(combined_contour)
-            features = analyze_contour_shape(smoothed_contour)
+        try:
+            print(f"\nProcessing image {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
             
-            results.append({
-                'image_path': image_path,
-                'left_contour': left_contour,
-                'right_contour': right_contour,
-                'smoothed_contour': smoothed_contour,
-                'features': features,
-                'ground_y': ground_y,
-                'press_y': press_y
-            })
+            # Get ground and press positions with fixed ground and temporal consistency
+            ground_y, press_y = detect_ground_and_press(image_path, fixed_ground_y, prev_press_y, search_range=15)
             
-            # Create plots
-            if output_folder:
-                # Original contour plot
-                plot_filename = f"contour_analysis_{i+1:03d}.png"
-                plot_path = os.path.join(output_folder, plot_filename)
-                plot_contour_analysis(image_path, left_contour, right_contour, ground_y, press_y, plot_path)
+            # Extract contours (ground/press detection is now done inside this function)
+            right_contour, left_contour = extract_contour_from_image_both_sides(image_path, fixed_ground_y=fixed_ground_y, prev_press_y=prev_press_y)
+            
+            # Update previous press position and history for next frame
+            if press_y is not None:
+                prev_press_y = press_y
+                press_history.append(press_y)
+                # Keep only last 5 positions
+                if len(press_history) > 5:
+                    press_history.pop(0)
+            
+            if left_contour is not None and right_contour is not None:
+                # Combine contours for analysis
+                combined_contour = np.vstack([left_contour, right_contour[::-1]])
+                smoothed_contour = smooth_contour(combined_contour)
+                features = analyze_contour_shape(smoothed_contour)
                 
-                # Contour distance plot
-                distance_filename = f"contour_distances_{i+1:03d}.png"
-                distance_path = os.path.join(output_folder, distance_filename)
-                plot_contour_distances(left_contour, right_contour, ground_y, press_y, distance_path)
+                results.append({
+                    'image_path': image_path,
+                    'left_contour': left_contour,
+                    'right_contour': right_contour,
+                    'smoothed_contour': smoothed_contour,
+                    'features': features,
+                    'ground_y': ground_y,
+                    'press_y': press_y
+                })
+                
+                # Create plots only if ground and press detection was successful
+                if ground_y is not None and press_y is not None:
+                    if output_folder:
+                        # Original contour plot
+                        plot_filename = f"contour_analysis_{i+1:03d}.png"
+                        plot_path = os.path.join(output_folder, plot_filename)
+                        plot_contour_analysis(image_path, left_contour, right_contour, ground_y, press_y, plot_path)
+                        
+                        # Contour distance plot
+                        distance_filename = f"contour_distances_{i+1:03d}.png"
+                        distance_path = os.path.join(output_folder, distance_filename)
+                        plot_contour_distances(left_contour, right_contour, ground_y, press_y, distance_path)
+                    else:
+                        if i < 3:  # Only show first 3 plots
+                            plot_contour_analysis(image_path, left_contour, right_contour, ground_y, press_y)
+                            plot_contour_distances(left_contour, right_contour, ground_y, press_y)
+                else:
+                    print(f"Warning: Ground/press detection failed for {os.path.basename(image_path)}, skipping plots")
             else:
-                if i < 3:  # Only show first 3 plots
-                    plot_contour_analysis(image_path, left_contour, right_contour, ground_y, press_y)
-                    plot_contour_distances(left_contour, right_contour, ground_y, press_y)
+                print(f"Warning: Contour extraction failed for {os.path.basename(image_path)}")
+                
+        except Exception as e:
+            print(f"Error processing image {os.path.basename(image_path)}: {e}")
+            continue  # Continue with next image
     
     return results
 
